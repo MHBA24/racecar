@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retro Racer 3D</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden; /* Prevent scrollbars */
+            background-color: #333;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        .ui-element {
+            position: absolute;
+            background-color: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 18px;
+            color: white;
+            text-shadow: 1px 1px 2px black;
+        }
+        #speed-display {
+            top: 10px;
+            left: 10px;
+        }
+        #lap-display {
+            top: 10px;
+            right: 10px;
+        }
+        #message-display {
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 48px;
+            padding: 20px;
+            text-align: center;
+            border: 2px solid white;
+        }
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+    <div id="speed-display" class="ui-element">Speed: 0 km/h</div>
+    <div id="lap-display" class="ui-element">Lap: 0/3</div>
+    <div id="message-display" class="ui-element hidden"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Global Variables ---
+        let scene, camera, renderer;
+        let playerCar;
+        let keys = {}; // To store keyboard state
+
+        // Car physics properties
+        let carSpeed = 0;
+        const maxSpeed = 0.8;
+        const acceleration = 0.015;
+        const deceleration = 0.01; // Natural deceleration/friction
+        const brakingForce = 0.03;
+        const turnSpeedFactor = 0.03; // How quickly the car turns
+
+        // Game state
+        let currentLap = 0;
+        const totalLaps = 3;
+        let gameOver = false;
+
+        // Track properties
+        const trackRadius = 60; // Radius of the circular track center
+        const trackWidth = 15;  // Width of the road
+        const finishLineZ = trackRadius; // Z position of the finish line (assuming start at Z=radius, X=0)
+        let crossedFinishLineThisFrame = false; // To prevent multiple lap counts per single crossing
+        let onCorrectSideOfFinishLine = true; // To ensure lap counts only after a full loop
+
+        // UI Elements
+        let speedDisplay, lapDisplay, messageDisplay;
+
+        // --- Initialization Function ---
+        function init() {
+            // Get UI elements
+            speedDisplay = document.getElementById('speed-display');
+            lapDisplay = document.getElementById('lap-display');
+            messageDisplay = document.getElementById('message-display');
+
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+
+            // Camera setup
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            // Initial camera position will be set relative to the car later
+
+            // Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; // Enable shadows
+            document.getElementById('game-container').appendChild(renderer.domElement);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7); // Soft white light
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(50, 100, 75);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048; // Higher res shadow
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 500;
+            directionalLight.shadow.camera.left = -100;
+            directionalLight.shadow.camera.right = 100;
+            directionalLight.shadow.camera.top = 100;
+            directionalLight.shadow.camera.bottom = -100;
+            scene.add(directionalLight);
+            // const helper = new THREE.CameraHelper( directionalLight.shadow.camera );
+            // scene.add( helper );
+
+
+            // Ground plane
+            const groundGeometry = new THREE.PlaneGeometry(500, 500);
+            const groundMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22 }); // Forest green
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2; // Rotate to be flat
+            ground.position.y = -0.1; // Slightly below the track
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // Track (simple circular road)
+            const trackGeometry = new THREE.RingGeometry(trackRadius - trackWidth / 2, trackRadius + trackWidth / 2, 64, 1);
+            const trackMaterial = new THREE.MeshStandardMaterial({ color: 0x444444, side: THREE.DoubleSide }); // Dark grey asphalt
+            const track = new THREE.Mesh(trackGeometry, trackMaterial);
+            track.rotation.x = -Math.PI / 2;
+            track.receiveShadow = true;
+            scene.add(track);
+
+            // Start/Finish Line Visual (Optional, but helpful)
+            const finishLineGeo = new THREE.PlaneGeometry(trackWidth, 2);
+            // Simple checkerboard texture for finish line
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 8;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0,0,32,8);
+            ctx.fillStyle = 'black';
+            ctx.fillRect(32,0,32,8);
+            const finishLineTexture = new THREE.CanvasTexture(canvas);
+            finishLineTexture.wrapS = THREE.RepeatWrapping;
+            finishLineTexture.wrapT = THREE.RepeatWrapping;
+            finishLineTexture.repeat.set(4,1);
+
+            const finishLineMat = new THREE.MeshBasicMaterial({ map: finishLineTexture, side: THREE.DoubleSide });
+            const finishLineMesh = new THREE.Mesh(finishLineGeo, finishLineMat);
+            finishLineMesh.rotation.x = -Math.PI / 2;
+            finishLineMesh.position.z = trackRadius;
+            finishLineMesh.position.y = 0.01; // Slightly above track
+            scene.add(finishLineMesh);
+
+
+            // Player Car
+            const carGeometry = new THREE.BoxGeometry(2, 1.2, 4); // width, height, length
+            const carMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 }); // Red car
+            playerCar = new THREE.Mesh(carGeometry, carMaterial);
+            playerCar.position.set(0, 0.6, trackRadius); // Start at the finish line, Y adjusted for height
+            playerCar.castShadow = true;
+            scene.add(playerCar);
+            playerCar.userData.lastZ = playerCar.position.z; // For lap detection
+
+            // Event Listeners for controls
+            window.addEventListener('keydown', (event) => keys[event.key.toLowerCase()] = true);
+            window.addEventListener('keyup', (event) => keys[event.key.toLowerCase()] = false);
+            window.addEventListener('resize', onWindowResize, false);
+
+            // Start the game loop
+            animate();
+        }
+
+        // --- Handle Window Resize ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Handle Player Input ---
+        function handleInput() {
+            if (gameOver) return;
+
+            let appliedAcceleration = 0;
+            let appliedBraking = 0;
+
+            // Acceleration
+            if (keys['w'] || keys['arrowup']) {
+                appliedAcceleration = acceleration;
+            }
+            // Braking / Reverse
+            if (keys['s'] || keys['arrowdown']) {
+                if (carSpeed > 0) {
+                    appliedBraking = brakingForce; // Stronger braking
+                } else {
+                    appliedAcceleration = -acceleration / 2; // Slower reverse
+                }
+            }
+
+            // Apply acceleration and braking
+            carSpeed += appliedAcceleration;
+            if (carSpeed > 0) {
+                carSpeed -= appliedBraking;
+            } else if (carSpeed < 0 && appliedBraking > 0) { // Braking while reversing
+                 carSpeed += appliedBraking; // Bring to stop
+            }
+
+
+            // Natural deceleration (friction)
+            if (appliedAcceleration === 0 && appliedBraking === 0) {
+                if (carSpeed > 0) {
+                    carSpeed -= deceleration;
+                    if (carSpeed < 0) carSpeed = 0;
+                } else if (carSpeed < 0) {
+                    carSpeed += deceleration;
+                    if (carSpeed > 0) carSpeed = 0;
+                }
+            }
+
+            // Cap speed
+            carSpeed = Math.max(-maxSpeed / 2, Math.min(maxSpeed, carSpeed)); // Max reverse speed is half of forward
+
+            // Turning (only when moving)
+            if (Math.abs(carSpeed) > 0.01) {
+                let turnDirection = 0;
+                if (keys['a'] || keys['arrowleft']) {
+                    turnDirection = 1;
+                }
+                if (keys['d'] || keys['arrowright']) {
+                    turnDirection = -1;
+                }
+                // Adjust turn angle based on speed (less turn at high speed for stability, or more for drift feel)
+                // Simple constant turn for now
+                playerCar.rotation.y += turnDirection * turnSpeedFactor * (carSpeed > 0 ? 1 : -1); // Invert steering in reverse
+            }
+        }
+
+        // --- Update Car Position and Physics ---
+        function updateCar() {
+            if (gameOver) return;
+
+            // Move car based on its orientation and speed
+            playerCar.translateX(carSpeed); // Moves along car's local X-axis (Three.js default for car front if not rotated)
+                                            // Wait, BoxGeometry length is Z. So we want to move along local Z.
+            // Corrected:
+            const forward = new THREE.Vector3();
+            playerCar.getWorldDirection(forward);
+            playerCar.position.addScaledVector(forward, carSpeed);
+
+
+            // Track Boundaries (simple circular track logic)
+            const distFromCenter = playerCar.position.length(); // Distance from (0,0,0)
+            const innerBound = trackRadius - trackWidth / 2;
+            const outerBound = trackRadius + trackWidth / 2;
+
+            if (distFromCenter < innerBound || distFromCenter > outerBound) {
+                carSpeed *= 0.95; // Slow down significantly if off-track
+                // Optional: A gentle push back towards track center could be added here
+                // For now, just slowing down.
+            }
+        }
+
+        // --- Update Camera Position to Follow Car ---
+        function updateCamera() {
+            const cameraOffset = new THREE.Vector3(0, 7, -12); // Behind and above car (local Z is forward for car)
+            const worldOffset = cameraOffset.applyMatrix4(playerCar.matrixWorld);
+            camera.position.lerp(worldOffset, 0.15); // Smooth camera follow
+
+            const lookAtPosition = new THREE.Vector3();
+            playerCar.getWorldPosition(lookAtPosition);
+            lookAtPosition.y += 1; // Look slightly above the car's center
+            camera.lookAt(lookAtPosition);
+        }
+
+        // --- Check Lap Completion ---
+        function checkLaps() {
+            if (gameOver) return;
+
+            const carZ = playerCar.position.z;
+            const carX = playerCar.position.x;
+
+            // Check if car is near the finish line Z coordinate and on the correct X side
+            // Finish line is at Z = trackRadius, X = 0
+            // Car starts at (0, y, trackRadius), moving counter-clockwise (positive X first, then negative Z)
+            const onFinishLineStrip = Math.abs(carX) < trackWidth / 2 && carZ > finishLineZ -1 && carZ < finishLineZ + 1;
+
+            if (onFinishLineStrip) {
+                // Check if moving from "before" finish line (Z < finishLineZ) to "after" (Z > finishLineZ)
+                // This logic assumes a specific direction (e.g. car moving towards +Z when crossing)
+                // For a circular track, it's crossing the Z=trackRadius plane from Z < trackRadius side.
+                // We need to make sure it completed a loop.
+
+                // Simplified: car crosses the Z-axis (x=0) in the positive Z part of the track
+                // AND its angular position implies it has gone around.
+                // We use `onCorrectSideOfFinishLine` to track if it has left the finish area and come back.
+
+                // Determine if car is in the "approach" or "departed" zone of the finish line
+                // For a car moving counter-clockwise, starting at (0,0,R) and moving towards +X
+                // The finish line is crossed when Z becomes > R again after having been < R
+                // And X is near 0.
+
+                if (carZ > playerCar.userData.lastZ && Math.abs(carX) < trackWidth / 4 && !onCorrectSideOfFinishLine) {
+                    // Crossed from Z < R to Z > R near X=0
+                    currentLap++;
+                    onCorrectSideOfFinishLine = true; // Must leave this zone and come back
+                    crossedFinishLineThisFrame = true; // Set flag for this frame
+                    console.log("Lap " + currentLap);
+
+                    if (currentLap > totalLaps) {
+                        gameOver = true;
+                        messageDisplay.textContent = "You Win!";
+                        messageDisplay.classList.remove('hidden');
+                        // No more car movement
+                        carSpeed = 0;
+                    }
+                }
+            } else {
+                 // If car is away from the finish line strip, it's eligible to score a lap again
+                if (carZ < 0 ) { // If car is on the opposite side of the circle
+                     onCorrectSideOfFinishLine = false;
+                }
+            }
+            playerCar.userData.lastZ = carZ;
+        }
+
+
+        // --- Update UI Elements ---
+        function updateUI() {
+            speedDisplay.textContent = `Speed: ${(Math.abs(carSpeed) * 50).toFixed(0)} km/h`; // Arbitrary scaling for display
+            lapDisplay.textContent = `Lap: ${Math.min(currentLap, totalLaps)}/${totalLaps}`;
+        }
+
+        // --- Game Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            crossedFinishLineThisFrame = false; // Reset per frame
+
+            if (!gameOver) {
+                handleInput();
+                updateCar();
+                checkLaps(); // Check laps after car update
+            }
+
+            updateCamera(); // Camera updates even if game over for final view
+            updateUI();
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Start the Game ---
+        init();
+
+    </script>
+</body>
+</html>
